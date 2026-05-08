@@ -20,6 +20,7 @@ import torch.nn as nn
 from sklearn.metrics import classification_report, confusion_matrix
 from torch.utils.data import DataLoader, WeightedRandomSampler
 from torchvision import transforms
+from torchvision.transforms import v2 as transforms_v2
 from tqdm import tqdm
 
 from dataset import AvatarDataset, CLASSES
@@ -32,16 +33,64 @@ IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
 
 
-def build_transforms(img_size: int):
-    train_tf = transforms.Compose([
-        transforms.Resize(int(img_size * 1.14)),
-        transforms.RandomResizedCrop(img_size, scale=(0.75, 1.0), ratio=(0.9, 1.1)),
-        transforms.RandomHorizontalFlip(),
-        transforms.ColorJitter(0.2, 0.2, 0.2, 0.05),
-        transforms.ToTensor(),
-        transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
-        transforms.RandomErasing(p=0.15, scale=(0.02, 0.1)),
-    ])
+def build_transforms(img_size: int, aug: str = "full", tensor_input: bool = False):
+    """
+    aug:  full  → RandomResizedCrop + Flip + ColorJitter + RandomErasing  (slow on CPU)
+          light → Flip only                                                 (recommended)
+          none  → no augmentation
+    tensor_input=True (for decoded_cache=True): use torchvision v2 ops that
+        accept uint8 CHW tensors directly — no PIL conversion overhead.
+    """
+    if tensor_input:
+        # uint8 [3,H,W] → augment → float32 normalized
+        if aug == "full":
+            train_ops = [
+                transforms_v2.RandomResizedCrop(img_size, scale=(0.75, 1.0),
+                                                ratio=(0.9, 1.1), antialias=True),
+                transforms_v2.RandomHorizontalFlip(),
+                transforms_v2.ColorJitter(0.2, 0.2, 0.2, 0.05),
+            ]
+        elif aug == "light":
+            train_ops = [transforms_v2.RandomHorizontalFlip()]
+        else:
+            train_ops = []
+        train_tf = transforms_v2.Compose(train_ops + [
+            transforms_v2.ToDtype(torch.float32, scale=True),  # uint8/255 → float
+            transforms_v2.Normalize(IMAGENET_MEAN, IMAGENET_STD),
+        ])
+        eval_tf = transforms_v2.Compose([
+            transforms_v2.ToDtype(torch.float32, scale=True),
+            transforms_v2.Normalize(IMAGENET_MEAN, IMAGENET_STD),
+        ])
+        return train_tf, eval_tf
+
+    # PIL pipeline
+    if aug == "full":
+        train_ops = [
+            transforms.Resize(int(img_size * 1.14)),
+            transforms.RandomResizedCrop(img_size, scale=(0.75, 1.0), ratio=(0.9, 1.1)),
+            transforms.RandomHorizontalFlip(),
+            transforms.ColorJitter(0.2, 0.2, 0.2, 0.05),
+            transforms.ToTensor(),
+            transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
+            transforms.RandomErasing(p=0.15, scale=(0.02, 0.1)),
+        ]
+    elif aug == "light":
+        train_ops = [
+            transforms.Resize(img_size),
+            transforms.CenterCrop(img_size),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
+        ]
+    else:
+        train_ops = [
+            transforms.Resize(img_size),
+            transforms.CenterCrop(img_size),
+            transforms.ToTensor(),
+            transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
+        ]
+    train_tf = transforms.Compose(train_ops)
     eval_tf = transforms.Compose([
         transforms.Resize(int(img_size * 1.14)),
         transforms.CenterCrop(img_size),
@@ -163,7 +212,12 @@ def main():
     ap.add_argument("--freeze-epochs", type=int, default=1,
                     help="Freeze backbone for N warmup epochs (head-only).")
     ap.add_argument("--preload", action="store_true",
-                    help="Load all JPEG bytes into RAM (fixes slow-disk bottleneck on Colab).")
+                    help="Cache JPEG bytes in RAM (fixes slow disk only).")
+    ap.add_argument("--cache-decoded", action="store_true",
+                    help="Pre-decode all images to a uint8 RAM tensor (kills CPU decode "
+                         "bottleneck — recommended on Colab free).")
+    ap.add_argument("--aug", choices=["full", "light", "none"], default="full",
+                    help="full=RRC+flip+colorjitter+erasing  light=flip only  none=off")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--out", default=None, help="Checkpoint output path (.pt)")
     args = ap.parse_args()
@@ -176,10 +230,13 @@ def main():
     classes = CLASSES[args.task]
     n_classes = len(classes)
 
-    train_tf, eval_tf = build_transforms(args.img_size)
-    train_ds = AvatarDataset("train", args.task, transform=train_tf, preload=args.preload)
-    val_ds   = AvatarDataset("val",   args.task, transform=eval_tf,  preload=args.preload)
-    test_ds  = AvatarDataset("test",  args.task, transform=eval_tf,  preload=args.preload)
+    train_tf, eval_tf = build_transforms(args.img_size, aug=args.aug,
+                                         tensor_input=args.cache_decoded)
+    ds_kwargs = dict(decoded_cache=args.cache_decoded, decoded_size=args.img_size,
+                     preload=args.preload and not args.cache_decoded)
+    train_ds = AvatarDataset("train", args.task, transform=train_tf, **ds_kwargs)
+    val_ds   = AvatarDataset("val",   args.task, transform=eval_tf,  **ds_kwargs)
+    test_ds  = AvatarDataset("test",  args.task, transform=eval_tf,  **ds_kwargs)
     print(f"Sizes: train={len(train_ds)} val={len(val_ds)} test={len(test_ds)}")
 
     if args.sampler == "weighted":

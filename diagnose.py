@@ -16,6 +16,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from torchvision import transforms
+from torchvision.transforms import v2 as transforms_v2
 
 from dataset import AvatarDataset, CLASSES
 from model import build_model
@@ -24,26 +25,36 @@ IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
 
 
-def make_loader(task, img_size, bs, workers, preload, augment):
-    if augment:
-        tf = transforms.Compose([
-            transforms.Resize(int(img_size * 1.14)),
-            transforms.RandomResizedCrop(img_size, scale=(0.75, 1.0)),
-            transforms.RandomHorizontalFlip(),
-            transforms.ColorJitter(0.2, 0.2, 0.2, 0.05),
-            transforms.ToTensor(),
-            transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
-            transforms.RandomErasing(p=0.15),
+def make_loader(task, img_size, bs, workers, preload, augment, cache_decoded=False):
+    if cache_decoded:
+        ops = [transforms_v2.RandomHorizontalFlip()] if augment else []
+        tf = transforms_v2.Compose(ops + [
+            transforms_v2.ToDtype(torch.float32, scale=True),
+            transforms_v2.Normalize(IMAGENET_MEAN, IMAGENET_STD),
         ])
+        ds = AvatarDataset("train", task, transform=tf,
+                           decoded_cache=True, decoded_size=img_size)
     else:
-        tf = transforms.Compose([
-            transforms.Resize(int(img_size * 1.14)),
-            transforms.CenterCrop(img_size),
-            transforms.ToTensor(),
-            transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
-        ])
-    ds = AvatarDataset("train", task, transform=tf, preload=preload)
-    print(f"  dataset size: {len(ds)}, preload={preload}, augment={augment}")
+        if augment:
+            tf = transforms.Compose([
+                transforms.Resize(int(img_size * 1.14)),
+                transforms.RandomResizedCrop(img_size, scale=(0.75, 1.0)),
+                transforms.RandomHorizontalFlip(),
+                transforms.ColorJitter(0.2, 0.2, 0.2, 0.05),
+                transforms.ToTensor(),
+                transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
+                transforms.RandomErasing(p=0.15),
+            ])
+        else:
+            tf = transforms.Compose([
+                transforms.Resize(int(img_size * 1.14)),
+                transforms.CenterCrop(img_size),
+                transforms.ToTensor(),
+                transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
+            ])
+        ds = AvatarDataset("train", task, transform=tf, preload=preload)
+    print(f"  dataset size: {len(ds)}, preload={preload}, "
+          f"cache_decoded={cache_decoded}, augment={augment}")
     return DataLoader(ds, batch_size=bs, shuffle=True, num_workers=workers,
                       pin_memory=True, persistent_workers=workers > 0,
                       drop_last=True)
@@ -114,6 +125,7 @@ def main():
     ap.add_argument("--batch-size", type=int, default=256)
     ap.add_argument("--workers", type=int, default=2)
     ap.add_argument("--preload", action="store_true")
+    ap.add_argument("--cache-decoded", action="store_true")
     ap.add_argument("--batches", type=int, default=20)
     args = ap.parse_args()
 
@@ -127,13 +139,13 @@ def main():
 
     print("\n[A1] Dataloader-only WITHOUT augmentation")
     loader = make_loader(args.task, args.img_size, args.batch_size, args.workers,
-                         args.preload, augment=False)
+                         args.preload, augment=False, cache_decoded=args.cache_decoded)
     n, dt = bench_dataloader(loader, args.batches)
     print(f"   {n} imgs in {dt:.2f}s → {n/dt:.0f} img/s")
 
     print("\n[A2] Dataloader-only WITH augmentation (matches train.py)")
     loader = make_loader(args.task, args.img_size, args.batch_size, args.workers,
-                         args.preload, augment=True)
+                         args.preload, augment=True, cache_decoded=args.cache_decoded)
     n, dt = bench_dataloader(loader, args.batches)
     print(f"   {n} imgs in {dt:.2f}s → {n/dt:.0f} img/s")
 

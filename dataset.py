@@ -3,6 +3,7 @@ import io
 from pathlib import Path
 from typing import Sequence
 
+import numpy as np
 import pandas as pd
 import torch
 from PIL import Image
@@ -24,7 +25,15 @@ CLASSES = {"gender": GENDER_CLASSES, "age": AGE_CLASSES}
 
 
 class AvatarDataset(Dataset):
-    def __init__(self, split: str, task: str, transform=None, preload: bool = False):
+    """
+    Modes (in order of speed):
+      preload=False, decoded_cache=False  → read JPEG from disk every step (slow)
+      preload=True                        → JPEGs in RAM as bytes; still decode each step
+      decoded_cache=True, decoded_size=N  → fully decoded uint8 tensor [N,3,H,W] in RAM
+                                            (no PIL/decode at runtime — fastest)
+    """
+    def __init__(self, split: str, task: str, transform=None, preload: bool = False,
+                 decoded_cache: bool = False, decoded_size: int = 160):
         assert split in ("train", "val", "test")
         assert task in ("gender", "age")
         self.task = task
@@ -38,11 +47,22 @@ class AvatarDataset(Dataset):
         self.ids = df["id"].tolist()
         self.labels = [self.cls2idx[v] for v in df[col].tolist()]
 
-        # Optional in-memory cache of JPEG bytes — kills disk-I/O bottleneck
-        # on slow filesystems (e.g. Colab /content). Decoding still happens in
-        # __getitem__ (cheap, parallelized by DataLoader workers).
         self._bytes_cache = None
-        if preload:
+        self._decoded_cache = None  # uint8 torch.Tensor [N, 3, H, W]
+
+        if decoded_cache:
+            n = len(self.ids)
+            arr = np.empty((n, decoded_size, decoded_size, 3), dtype=np.uint8)
+            for i, uid in enumerate(tqdm(self.ids, desc=f"decode→RAM {split}", leave=False)):
+                with Image.open(IMAGES_DIR / f"{uid}.jpg") as im:
+                    im = im.convert("RGB").resize((decoded_size, decoded_size),
+                                                  Image.BILINEAR)
+                    arr[i] = np.asarray(im)
+            # to torch CHW uint8 (transpose once, contiguous)
+            self._decoded_cache = torch.from_numpy(arr).permute(0, 3, 1, 2).contiguous()
+            mb = self._decoded_cache.numel() / (1024 ** 2)
+            print(f"  decoded cache [{split}]: {self._decoded_cache.shape} uint8, {mb:.0f} MB")
+        elif preload:
             self._bytes_cache = []
             for uid in tqdm(self.ids, desc=f"preload {split}", leave=False):
                 with open(IMAGES_DIR / f"{uid}.jpg", "rb") as f:
@@ -52,7 +72,10 @@ class AvatarDataset(Dataset):
         return len(self.ids)
 
     def __getitem__(self, i):
-        if self._bytes_cache is not None:
+        if self._decoded_cache is not None:
+            # transform is expected to handle uint8 CHW tensors (use v2 transforms).
+            img = self._decoded_cache[i]
+        elif self._bytes_cache is not None:
             img = Image.open(io.BytesIO(self._bytes_cache[i])).convert("RGB")
         else:
             img = Image.open(IMAGES_DIR / f"{self.ids[i]}.jpg").convert("RGB")
