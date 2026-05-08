@@ -28,10 +28,15 @@ TARGET_SIZE = 256  # store at 256, train transforms will crop to 224
 
 
 def load_and_clean() -> pd.DataFrame:
-    csvs = sorted(DATASET_DIR.glob("followers_dataset*.csv"))
-    if not csvs:
-        raise FileNotFoundError(f"No followers_dataset*.csv in {DATASET_DIR}")
-    df = pd.concat([pd.read_csv(p) for p in csvs], ignore_index=True)
+    fresh = DATASET_DIR / "labeled_fresh.csv"
+    if fresh.exists():
+        print(f"Using refreshed dataset: {fresh.name}")
+        df = pd.read_csv(fresh)
+    else:
+        csvs = sorted(DATASET_DIR.glob("followers_dataset*.csv"))
+        if not csvs:
+            raise FileNotFoundError(f"No followers_dataset*.csv in {DATASET_DIR}")
+        df = pd.concat([pd.read_csv(p) for p in csvs], ignore_index=True)
     df = df[["id", "avatar", "vllm_gender_prediction", "vllm_age_range_prediction"]]
     df = df.dropna()
     df = df.drop_duplicates(subset=["id"])

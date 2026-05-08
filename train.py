@@ -11,6 +11,9 @@ import time
 from collections import Counter
 from pathlib import Path
 
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn as nn
@@ -80,6 +83,52 @@ def evaluate(model, loader, device, classes):
     acc = float(np.mean(np.array(all_y) == np.array(all_p)))
     macro_f1 = _macro_f1(all_y, all_p, len(classes))
     return total_loss / max(n, 1), acc, macro_f1, all_y, all_p
+
+
+def plot_curves(history, out_path: Path, title: str):
+    epochs = [h["epoch"] for h in history]
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+    axes[0].plot(epochs, [h["train_loss"] for h in history], label="train", marker="o")
+    axes[0].plot(epochs, [h["val_loss"]   for h in history], label="val",   marker="s")
+    axes[0].set_title("Loss"); axes[0].set_xlabel("epoch"); axes[0].legend(); axes[0].grid(alpha=0.3)
+
+    axes[1].plot(epochs, [h["train_acc"] for h in history], label="train", marker="o")
+    axes[1].plot(epochs, [h["val_acc"]   for h in history], label="val",   marker="s")
+    axes[1].set_title("Accuracy"); axes[1].set_xlabel("epoch"); axes[1].legend(); axes[1].grid(alpha=0.3)
+
+    axes[2].plot(epochs, [h["val_macro_f1"] for h in history], color="tab:green", marker="d")
+    axes[2].set_title("Val macro-F1"); axes[2].set_xlabel("epoch"); axes[2].grid(alpha=0.3)
+
+    fig.suptitle(title)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=130, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_confusion(y_true, y_pred, classes, out_path: Path, title: str):
+    cm = confusion_matrix(y_true, y_pred, labels=list(range(len(classes))))
+    cm_norm = cm.astype(np.float64) / np.maximum(cm.sum(axis=1, keepdims=True), 1)
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    for ax, mat, sub, fmt, vmax in [
+        (axes[0], cm,      "Counts",     "d",    None),
+        (axes[1], cm_norm, "Row-normalized", ".2f", 1.0),
+    ]:
+        im = ax.imshow(mat, cmap="Blues", vmin=0, vmax=vmax)
+        ax.set_xticks(range(len(classes))); ax.set_yticks(range(len(classes)))
+        ax.set_xticklabels(classes, rotation=30, ha="right")
+        ax.set_yticklabels(classes)
+        ax.set_xlabel("Predicted"); ax.set_ylabel("True"); ax.set_title(sub)
+        thresh = mat.max() / 2 if mat.max() > 0 else 0.5
+        for i in range(len(classes)):
+            for j in range(len(classes)):
+                ax.text(j, i, format(mat[i, j], fmt), ha="center", va="center",
+                        color="white" if mat[i, j] > thresh else "black", fontsize=9)
+        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    fig.suptitle(title)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=130, bbox_inches="tight")
+    plt.close(fig)
 
 
 def _macro_f1(y_true, y_pred, n_classes):
@@ -244,8 +293,21 @@ def main():
     log_path.write_text(json.dumps({
         "args": vars(args), "history": history,
         "test": {"loss": test_loss, "acc": test_acc, "macro_f1": test_f1},
+        "test_classification_report": classification_report(
+            y, p, target_names=classes, digits=3, zero_division=0, output_dict=True
+        ),
+        "test_confusion_matrix": confusion_matrix(
+            y, p, labels=list(range(n_classes))
+        ).tolist(),
     }, indent=2))
     print(f"Training log -> {log_path}")
+
+    curves_path  = out_path.with_name(out_path.stem + "_curves.png")
+    confmat_path = out_path.with_name(out_path.stem + "_confmat.png")
+    title = f"{args.task} | {args.backbone} (test acc={test_acc:.3f}, macroF1={test_f1:.3f})"
+    plot_curves(history, curves_path, title)
+    plot_confusion(y, p, classes, confmat_path, title)
+    print(f"Plots -> {curves_path.name}, {confmat_path.name}")
 
 
 if __name__ == "__main__":

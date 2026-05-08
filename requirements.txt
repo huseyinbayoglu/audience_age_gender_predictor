@@ -9,3 +9,4 @@ aiohttp
 tqdm
 scikit-learn
 python-dotenv
+matplotlib

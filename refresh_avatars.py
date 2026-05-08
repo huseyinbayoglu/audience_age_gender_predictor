@@ -20,16 +20,39 @@ import time
 from pathlib import Path
 
 import pandas as pd
-from dotenv import load_dotenv
 from tqdm import tqdm
 
 ROOT = Path(__file__).parent
 DATASET_DIR = ROOT / "dataset"
 OUT_PATH = DATASET_DIR / "labeled_fresh.csv"
 
-load_dotenv(ROOT / ".env")
-API_KEY = os.environ["RAPIDAPI_KEY"]
-API_HOST = os.environ.get("RAPIDAPI_HOST", "tiktok-scraper7.p.rapidapi.com")
+API_HOST = "tiktok-scraper7.p.rapidapi.com"
+
+
+def _load_api_key() -> str:
+    """Try Colab userdata first, then .env, then env var."""
+    try:
+        from google.colab import userdata  # type: ignore
+        key = userdata.get("rapid_tiktok")
+        if key:
+            return key
+    except Exception:
+        pass
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(ROOT / ".env")
+    except Exception:
+        pass
+    key = os.environ.get("RAPIDAPI_KEY") or os.environ.get("rapid_tiktok")
+    if not key:
+        raise RuntimeError(
+            "API key not found. In Colab: Secrets → add 'rapid_tiktok'. "
+            "Locally: set RAPIDAPI_KEY in .env."
+        )
+    return key
+
+
+API_KEY = _load_api_key()
 
 GENDER_CLASSES = {"male", "female", "unknown"}
 AGE_CLASSES = {"18-", "18-24", "25-34", "35-44", "45+", "unknown"}
