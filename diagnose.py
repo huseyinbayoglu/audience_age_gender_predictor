@@ -137,21 +137,49 @@ def main():
     n, dt = bench_model(device, args.img_size, args.batch_size, n_classes, args.batches)
     print(f"   {n} imgs in {dt:.2f}s → {n/dt:.0f} img/s   ({dt/args.batches*1000:.0f} ms/iter)")
 
-    print("\n[A1] Dataloader-only WITHOUT augmentation")
-    loader = make_loader(args.task, args.img_size, args.batch_size, args.workers,
-                         args.preload, augment=False, cache_decoded=args.cache_decoded)
-    n, dt = bench_dataloader(loader, args.batches)
-    print(f"   {n} imgs in {dt:.2f}s → {n/dt:.0f} img/s")
+    # Build dataset ONCE; swap transforms in-place to avoid duplicating the cache.
+    if args.cache_decoded:
+        no_aug_tf = transforms_v2.Compose([
+            transforms_v2.ToDtype(torch.float32, scale=True),
+            transforms_v2.Normalize(IMAGENET_MEAN, IMAGENET_STD),
+        ])
+        aug_tf = transforms_v2.Compose([
+            transforms_v2.RandomHorizontalFlip(),
+            transforms_v2.ToDtype(torch.float32, scale=True),
+            transforms_v2.Normalize(IMAGENET_MEAN, IMAGENET_STD),
+        ])
+        ds = AvatarDataset("train", args.task, transform=no_aug_tf,
+                           decoded_cache=True, decoded_size=args.img_size)
 
-    print("\n[A2] Dataloader-only WITH augmentation (matches train.py)")
-    loader = make_loader(args.task, args.img_size, args.batch_size, args.workers,
-                         args.preload, augment=True, cache_decoded=args.cache_decoded)
-    n, dt = bench_dataloader(loader, args.batches)
-    print(f"   {n} imgs in {dt:.2f}s → {n/dt:.0f} img/s")
+        def mk(transform):
+            ds.transform = transform
+            return DataLoader(ds, batch_size=args.batch_size, shuffle=True,
+                              num_workers=args.workers, pin_memory=True,
+                              persistent_workers=args.workers > 0, drop_last=True)
 
-    print("\n[C] End-to-end (dataloader + model)")
-    n, dt = bench_e2e(loader, device, n_classes, args.batches)
-    print(f"   {n} imgs in {dt:.2f}s → {n/dt:.0f} img/s   ({dt/args.batches*1000:.0f} ms/iter)")
+        print("\n[A1] Dataloader-only WITHOUT augmentation")
+        n, dt = bench_dataloader(mk(no_aug_tf), args.batches)
+        print(f"   {n} imgs in {dt:.2f}s → {n/dt:.0f} img/s")
+        print("\n[A2] Dataloader-only WITH augmentation")
+        n, dt = bench_dataloader(mk(aug_tf), args.batches)
+        print(f"   {n} imgs in {dt:.2f}s → {n/dt:.0f} img/s")
+        print("\n[C] End-to-end (dataloader + model)")
+        n, dt = bench_e2e(mk(aug_tf), device, n_classes, args.batches)
+        print(f"   {n} imgs in {dt:.2f}s → {n/dt:.0f} img/s   ({dt/args.batches*1000:.0f} ms/iter)")
+    else:
+        print("\n[A1] Dataloader-only WITHOUT augmentation")
+        loader = make_loader(args.task, args.img_size, args.batch_size, args.workers,
+                             args.preload, augment=False, cache_decoded=False)
+        n, dt = bench_dataloader(loader, args.batches)
+        print(f"   {n} imgs in {dt:.2f}s → {n/dt:.0f} img/s")
+        print("\n[A2] Dataloader-only WITH augmentation")
+        loader = make_loader(args.task, args.img_size, args.batch_size, args.workers,
+                             args.preload, augment=True, cache_decoded=False)
+        n, dt = bench_dataloader(loader, args.batches)
+        print(f"   {n} imgs in {dt:.2f}s → {n/dt:.0f} img/s")
+        print("\n[C] End-to-end")
+        n, dt = bench_e2e(loader, device, n_classes, args.batches)
+        print(f"   {n} imgs in {dt:.2f}s → {n/dt:.0f} img/s   ({dt/args.batches*1000:.0f} ms/iter)")
 
     print("\n--- Verdict ---")
     print("If A2 << B → CPU augmentation is the bottleneck (try lighter aug or GPU aug).")
