@@ -46,25 +46,29 @@ def load_and_clean() -> pd.DataFrame:
     return df.reset_index(drop=True)
 
 
-def stratified_split(df: pd.DataFrame, seed: int = 42):
-    # Stratify on combined label so both gender & age stay balanced across splits.
-    strat = df["vllm_gender_prediction"] + "|" + df["vllm_age_range_prediction"]
-    # Some combos are tiny; collapse rare strata (<3 rows) to a single bucket.
-    counts = strat.value_counts()
-    rare = counts[counts < 3].index
-    strat = strat.where(~strat.isin(rare), other="__rare__")
+def _coerce_stratifiable(s: pd.Series, min_count: int = 2):
+    """Pool rare strata; if even the pooled bucket is too small, return None
+    so train_test_split falls back to a random (non-stratified) split."""
+    counts = s.value_counts()
+    rare = counts[counts < min_count].index
+    s = s.where(~s.isin(rare), other="__rare__")
+    if (s.value_counts() < min_count).any():
+        return None
+    return s
 
+
+def stratified_split(df: pd.DataFrame, seed: int = 42):
+    strat = df["vllm_gender_prediction"] + "|" + df["vllm_age_range_prediction"]
     train_df, temp_df = train_test_split(
-        df, test_size=0.15, stratify=strat, random_state=seed
+        df, test_size=0.15, stratify=_coerce_stratifiable(strat), random_state=seed
     )
     strat_temp = (
         temp_df["vllm_gender_prediction"] + "|" + temp_df["vllm_age_range_prediction"]
     )
-    counts2 = strat_temp.value_counts()
-    rare2 = counts2[counts2 < 2].index
-    strat_temp = strat_temp.where(~strat_temp.isin(rare2), other="__rare__")
     val_df, test_df = train_test_split(
-        temp_df, test_size=1 / 3, stratify=strat_temp, random_state=seed
+        temp_df, test_size=1 / 3,
+        stratify=_coerce_stratifiable(strat_temp),
+        random_state=seed,
     )
     return (
         train_df.reset_index(drop=True),
