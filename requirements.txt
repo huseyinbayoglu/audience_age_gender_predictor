@@ -1,0 +1,11 @@
+torch>=2.1
+torchvision>=0.16
+timm>=1.0
+pandas
+numpy
+pillow
+opencv-python-headless
+aiohttp
+tqdm
+scikit-learn
+python-dotenv
