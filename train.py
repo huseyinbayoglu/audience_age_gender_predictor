@@ -162,6 +162,8 @@ def main():
                     help="Apply inverse-freq class weights in CE loss (in addition to/instead of sampler).")
     ap.add_argument("--freeze-epochs", type=int, default=1,
                     help="Freeze backbone for N warmup epochs (head-only).")
+    ap.add_argument("--preload", action="store_true",
+                    help="Load all JPEG bytes into RAM (fixes slow-disk bottleneck on Colab).")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--out", default=None, help="Checkpoint output path (.pt)")
     args = ap.parse_args()
@@ -175,9 +177,9 @@ def main():
     n_classes = len(classes)
 
     train_tf, eval_tf = build_transforms(args.img_size)
-    train_ds = AvatarDataset("train", args.task, transform=train_tf)
-    val_ds   = AvatarDataset("val",   args.task, transform=eval_tf)
-    test_ds  = AvatarDataset("test",  args.task, transform=eval_tf)
+    train_ds = AvatarDataset("train", args.task, transform=train_tf, preload=args.preload)
+    val_ds   = AvatarDataset("val",   args.task, transform=eval_tf,  preload=args.preload)
+    test_ds  = AvatarDataset("test",  args.task, transform=eval_tf,  preload=args.preload)
     print(f"Sizes: train={len(train_ds)} val={len(val_ds)} test={len(test_ds)}")
 
     if args.sampler == "weighted":
