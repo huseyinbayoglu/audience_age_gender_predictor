@@ -52,14 +52,15 @@ class AvatarDataset(Dataset):
 
         if decoded_cache:
             n = len(self.ids)
-            arr = np.empty((n, decoded_size, decoded_size, 3), dtype=np.uint8)
+            # Allocate directly as CHW so torch.from_numpy is zero-copy.
+            # (Avoids a transient duplicate that doubled peak RAM at img_size=224.)
+            arr = np.empty((n, 3, decoded_size, decoded_size), dtype=np.uint8)
             for i, uid in enumerate(tqdm(self.ids, desc=f"decode→RAM {split}", leave=False)):
                 with Image.open(IMAGES_DIR / f"{uid}.jpg") as im:
                     im = im.convert("RGB").resize((decoded_size, decoded_size),
                                                   Image.BILINEAR)
-                    arr[i] = np.asarray(im)
-            # to torch CHW uint8 (transpose once, contiguous)
-            self._decoded_cache = torch.from_numpy(arr).permute(0, 3, 1, 2).contiguous()
+                    arr[i] = np.asarray(im).transpose(2, 0, 1)  # HWC → CHW in-place
+            self._decoded_cache = torch.from_numpy(arr)  # shares memory, no copy
             mb = self._decoded_cache.numel() / (1024 ** 2)
             print(f"  decoded cache [{split}]: {self._decoded_cache.shape} uint8, {mb:.0f} MB")
         elif preload:
