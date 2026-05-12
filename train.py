@@ -154,6 +154,45 @@ def plot_curves(history, out_path: Path, title: str):
     plt.close(fig)
 
 
+def plot_test_samples(test_ds, y_true, y_pred, classes, out_path: Path, n_total: int = 10):
+    """N-row × 3-col figure: image | true label | predicted label.
+    Half correct + half wrong (or as many as available)."""
+    import random
+    from PIL import Image
+    from dataset import IMAGES_DIR
+
+    correct = [i for i, (a, b) in enumerate(zip(y_true, y_pred)) if a == b]
+    wrong   = [i for i, (a, b) in enumerate(zip(y_true, y_pred)) if a != b]
+    random.seed(0)
+    random.shuffle(correct); random.shuffle(wrong)
+    half = n_total // 2
+    chosen = wrong[:half] + correct[:n_total - len(wrong[:half])]
+    chosen = chosen[:n_total]
+    n = len(chosen)
+    if n == 0: return
+
+    fig, axes = plt.subplots(n, 3, figsize=(9, 2.4 * n),
+                             gridspec_kw={"width_ratios": [1.2, 1, 1]})
+    if n == 1: axes = axes.reshape(1, 3)
+    for row, i in enumerate(chosen):
+        img = Image.open(IMAGES_DIR / f"{test_ds.ids[i]}.jpg").convert("RGB")
+        axes[row, 0].imshow(img); axes[row, 0].axis("off")
+        ok = y_true[i] == y_pred[i]
+        axes[row, 1].text(0.5, 0.5, classes[y_true[i]], fontsize=18,
+                          ha="center", va="center")
+        axes[row, 1].axis("off")
+        axes[row, 2].text(0.5, 0.5, classes[y_pred[i]], fontsize=18,
+                          ha="center", va="center",
+                          color="green" if ok else "red", weight="bold")
+        axes[row, 2].axis("off")
+    axes[0, 0].set_title("Image", fontsize=14)
+    axes[0, 1].set_title("True", fontsize=14)
+    axes[0, 2].set_title("Predicted", fontsize=14)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=120, bbox_inches="tight")
+    plt.close(fig)
+
+
 def plot_confusion(y_true, y_pred, classes, out_path: Path, title: str):
     cm = confusion_matrix(y_true, y_pred, labels=list(range(len(classes))))
     cm_norm = cm.astype(np.float64) / np.maximum(cm.sum(axis=1, keepdims=True), 1)
@@ -205,6 +244,13 @@ def main():
     ap.add_argument("--weight-decay", type=float, default=1e-4)
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--label-smoothing", type=float, default=0.05)
+    ap.add_argument("--drop-rate", type=float, default=0.2,
+                    help="Dropout in the classifier head (higher = more regularization).")
+    ap.add_argument("--sample-vis", type=int, default=10,
+                    help="N test samples to plot as a Nx3 image|true|pred grid (0=off).")
+    ap.add_argument("--mixup", type=float, default=0.0,
+                    help="Mixup alpha (e.g. 0.2). 0 disables. Strong regularizer for "
+                         "clean-label datasets; disables class-weighted loss while active.")
     ap.add_argument("--sampler", choices=["weighted", "none"], default="weighted",
                     help="WeightedRandomSampler balances classes during training.")
     ap.add_argument("--use-class-weights", action="store_true",
@@ -256,7 +302,8 @@ def main():
                               num_workers=args.workers, pin_memory=pin,
                               persistent_workers=args.workers > 0)
 
-    model = build_model(num_classes=n_classes, backbone=args.backbone, pretrained=True).to(device)
+    model = build_model(num_classes=n_classes, backbone=args.backbone,
+                        pretrained=True, drop_rate=args.drop_rate).to(device)
 
     cls_w = class_weights_inverse_freq(train_ds.labels, n_classes).to(device) \
         if args.use_class_weights else None
@@ -292,11 +339,25 @@ def main():
         pbar = tqdm(train_loader, desc=f"epoch {epoch}/{args.epochs}{' [frozen]' if freeze else ''}")
         for x, y in pbar:
             x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
+            # Mixup: blend two examples and their one-hot labels with the same lambda.
+            if args.mixup > 0:
+                lam = float(np.random.beta(args.mixup, args.mixup))
+                idx = torch.randperm(x.size(0), device=device)
+                x_mix = lam * x + (1 - lam) * x[idx]
+                y_oh = torch.nn.functional.one_hot(y, n_classes).float()
+                y_mix = lam * y_oh + (1 - lam) * y_oh[idx]
+                # Apply label smoothing on the soft target.
+                if args.label_smoothing > 0:
+                    y_mix = y_mix * (1 - args.label_smoothing) + args.label_smoothing / n_classes
             optim.zero_grad(set_to_none=True)
             with torch.autocast(device_type=device.type, dtype=torch.float16,
                                 enabled=device.type == "cuda"):
-                logits = model(x)
-                loss = criterion(logits, y)
+                if args.mixup > 0:
+                    logits = model(x_mix)
+                    loss = -(y_mix * torch.nn.functional.log_softmax(logits, dim=1)).sum(1).mean()
+                else:
+                    logits = model(x)
+                    loss = criterion(logits, y)
             if scaler.is_enabled():
                 scaler.scale(loss).backward()
                 scaler.unscale_(optim)
@@ -308,6 +369,8 @@ def main():
                 optim.step()
             with torch.no_grad():
                 running_loss += loss.item() * x.size(0); running_n += x.size(0)
+                # Accuracy reported against original (un-mixed) labels — under
+                # mixup this is approximate but still tracks learning trend.
                 running_correct += (logits.argmax(1) == y).sum().item()
             pbar.set_postfix(loss=f"{running_loss/running_n:.3f}",
                              acc=f"{running_correct/running_n:.3f}")
@@ -367,6 +430,10 @@ def main():
     plot_curves(history, curves_path, title)
     plot_confusion(y, p, classes, confmat_path, title)
     print(f"Plots -> {curves_path.name}, {confmat_path.name}")
+    if args.sample_vis > 0:
+        samples_path = out_path.with_name(out_path.stem + "_samples.png")
+        plot_test_samples(test_ds, y, p, classes, samples_path, n_total=args.sample_vis)
+        print(f"Sample grid -> {samples_path.name}")
 
 
 if __name__ == "__main__":
