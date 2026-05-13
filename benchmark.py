@@ -257,7 +257,8 @@ def bench_small(ckpt_path, images, device, batch_size=512, compile_model=True,
     if device.type == "cuda": torch.cuda.synchronize()
     timings["warmup_s"] = time.time() - t
 
-    print(f"  Inference (batch={batch_size}, compile={compile_mode}, "
+    compile_label = compile_mode if compile_model else "off"
+    print(f"  Inference (batch={batch_size}, compile={compile_label}, "
           f"gpu_preload={gpu_preload})...")
     preds_idx = []
     if device.type == "cuda": torch.cuda.synchronize()
