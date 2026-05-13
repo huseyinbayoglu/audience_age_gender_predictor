@@ -198,7 +198,8 @@ def bench_vllm(images, model_id=VLLM_MODEL_ID):
 
 
 # ==================== Small-model benchmark ====================
-def bench_small(ckpt_path, images, device, batch_size=512, compile_model=True):
+def bench_small(ckpt_path, images, device, batch_size=512, compile_model=True,
+                compile_mode="reduce-overhead", gpu_preload=False):
     from model import build_model
 
     timings = {}
@@ -211,7 +212,7 @@ def bench_small(ckpt_path, images, device, batch_size=512, compile_model=True):
     model = model.to(device).eval().to(memory_format=torch.channels_last)
     if compile_model:
         try:
-            model = torch.compile(model, mode="reduce-overhead")
+            model = torch.compile(model, mode=compile_mode)
         except Exception as e:
             print(f"  torch.compile unavailable ({e}); continuing without.")
     timings["model_load_s"] = time.time() - t
@@ -232,26 +233,43 @@ def bench_small(ckpt_path, images, device, batch_size=512, compile_model=True):
           f"({len(images)/timings['preprocess_s']:.0f} img/s) "
           f"shape={tuple(tensors.shape)}")
 
+    if gpu_preload and device.type == "cuda":
+        t = time.time()
+        tensors = tensors.to(device, non_blocking=False
+                             ).to(memory_format=torch.channels_last)
+        torch.cuda.synchronize()
+        timings["h2d_preload_s"] = time.time() - t
+        mb = tensors.element_size() * tensors.nelement() / 1e6
+        print(f"  GPU-preloaded all tensors ({mb:.0f} MB) in "
+              f"{timings['h2d_preload_s']:.2f}s — no PCIe transfer during inference")
+
     print("  Warmup (3× batches)...")
     t = time.time()
     with torch.inference_mode(), torch.autocast(device.type, dtype=torch.float16,
                                                 enabled=device.type == "cuda"):
         for _ in range(3):
-            x = tensors[:batch_size].to(device, non_blocking=True
-                                        ).to(memory_format=torch.channels_last)
+            if tensors.is_cuda:
+                x = tensors[:batch_size]
+            else:
+                x = tensors[:batch_size].to(device, non_blocking=True
+                                            ).to(memory_format=torch.channels_last)
             _ = model(x)
     if device.type == "cuda": torch.cuda.synchronize()
     timings["warmup_s"] = time.time() - t
 
-    print(f"  Inference (batch={batch_size})...")
+    print(f"  Inference (batch={batch_size}, compile={compile_mode}, "
+          f"gpu_preload={gpu_preload})...")
     preds_idx = []
     if device.type == "cuda": torch.cuda.synchronize()
     t = time.time()
     with torch.inference_mode(), torch.autocast(device.type, dtype=torch.float16,
                                                 enabled=device.type == "cuda"):
         for i in range(0, len(tensors), batch_size):
-            x = tensors[i:i+batch_size].to(device, non_blocking=True
-                                            ).to(memory_format=torch.channels_last)
+            if tensors.is_cuda:
+                x = tensors[i:i+batch_size]
+            else:
+                x = tensors[i:i+batch_size].to(device, non_blocking=True
+                                                ).to(memory_format=torch.channels_last)
             preds_idx.append(model(x).argmax(1).cpu())
     if device.type == "cuda": torch.cuda.synchronize()
     timings["inference_s"] = time.time() - t
@@ -324,6 +342,13 @@ def main():
     ap.add_argument("--skip-vllm", action="store_true")
     ap.add_argument("--skip-small", action="store_true")
     ap.add_argument("--no-compile", action="store_true")
+    ap.add_argument("--compile-mode", default="reduce-overhead",
+                    choices=["reduce-overhead", "max-autotune", "default"],
+                    help="torch.compile mode. max-autotune is slowest to compile "
+                         "but fastest at runtime (Ampere/Hopper).")
+    ap.add_argument("--gpu-preload", action="store_true",
+                    help="Move all preprocessed tensors to GPU once (skips per-batch "
+                         "H2D transfer). Useful on A100/A40 with ample VRAM.")
     ap.add_argument("--vllm-model", default=VLLM_MODEL_ID)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out-dir", default=str(ROOT))
@@ -406,7 +431,9 @@ def main():
             raise FileNotFoundError(f"Checkpoint not found: {args.ckpt}")
         small = bench_small(args.ckpt, images, device,
                             batch_size=args.batch_size,
-                            compile_model=not args.no_compile)
+                            compile_model=not args.no_compile,
+                            compile_mode=args.compile_mode,
+                            gpu_preload=args.gpu_preload)
         print(f"  inference:  {small['timings']['inference_s']:.3f}s")
         print(f"  throughput: {small['throughput_img_s']:.1f} img/s")
         print(f"  latency:    {small['latency_ms_img']:.3f} ms/img")
